@@ -1,0 +1,560 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Emotion Demo</title>
+<script src="https://cdn.jsdelivr.net/npm/@vladmandic/face-api@1.7.15/dist/face-api.js"></script>
+<style>
+  :root { --bg:#111418; --card:#1b2027; --text:#e8ecf1; --muted:#8a94a3; --line:#2a313b; }
+  * { box-sizing: border-box; }
+  body { margin:0; background:var(--bg); color:var(--text); font-family:system-ui,sans-serif;
+         display:flex; flex-direction:column; align-items:center; padding:10px 12px; }
+  h1 { font-size:15px; margin:0 0 8px; font-weight:600; }
+  .wrap { display:flex; gap:10px; flex-wrap:wrap; justify-content:center; align-items:flex-start; }
+  .stage { position:relative; width:380px; max-width:100%; aspect-ratio:4/3; background:#000; border-radius:10px; overflow:hidden; }
+  video, canvas { position:absolute; inset:0; width:100%; height:100%; transform:scaleX(-1); }
+  .panel { width:200px; max-width:100%; background:var(--card); border-radius:10px; padding:10px 12px; }
+  .panel h2 { font-size:11px; letter-spacing:.08em; text-transform:uppercase; color:var(--muted); margin:0 0 2px; font-weight:600; }
+  .verdict { font-size:20px; font-weight:700; text-align:center; margin:0; text-transform:capitalize; }
+  .emoji { font-size:34px; text-align:center; line-height:1.2; }
+  .conf { text-align:center; color:var(--muted); font-size:11px; margin-bottom:6px; min-height:1.2em; }
+  .row { display:flex; align-items:center; gap:6px; font-size:11px; margin:4px 0; }
+  .row span:first-child { width:60px; color:var(--muted); }
+  .bar { flex:1; height:6px; background:var(--line); border-radius:3px; overflow:hidden; }
+  .bar i { display:block; height:100%; width:0; transition:width .2s; }
+  .row span:last-child { width:30px; text-align:right; font-variant-numeric:tabular-nums; }
+  .note { color:var(--muted); font-size:10.5px; margin-top:6px; line-height:1.3; }
+  button { width:100%; padding:6px; margin:6px 0 2px; border:none; border-radius:7px; background:#4f8cff; color:#fff; font-size:12px; font-weight:600; cursor:pointer; }
+  button:disabled { background:var(--line); color:var(--muted); cursor:default; }
+  .level { height:4px; background:var(--line); border-radius:2px; overflow:hidden; margin:2px 0 6px; }
+  .level i { display:block; height:100%; width:0; background:#3ecf8e; transition:width .08s; }
+  .hand { font-size:12px; padding:5px 0; border-top:1px solid var(--line); line-height:1.35; }
+  .hand b { color:var(--muted); font-weight:600; display:block; font-size:10px; letter-spacing:.06em; text-transform:uppercase; }
+  .events { font-size:11px; color:var(--muted); line-height:1.4; margin-top:2px; min-height:4.2em; }
+  .explain { width:100%; max-width:1040px; margin-top:10px; }
+  .explain .controls { display:flex; gap:12px; align-items:center; flex-wrap:wrap; }
+  .explain button { width:auto; padding:6px 14px; margin:0; }
+  .explain label { font-size:12px; color:var(--muted); display:flex; gap:6px; align-items:center; cursor:pointer; }
+  #x-out { margin-top:8px; display:flex; flex-direction:column; gap:6px; }
+  #x-out div { font-size:14px; line-height:1.4; }
+  #x-out div small { color:var(--muted); font-size:11px; margin-right:8px; font-variant-numeric:tabular-nums; }
+  #x-out div.old { opacity:.55; font-size:12px; }
+  #x-out .err { color:#f25c54; }
+  #status { color:var(--muted); font-size:11px; margin-top:8px; }
+</style>
+</head>
+<body>
+<h1>Face, Voice + Hand Gesture Demo</h1>
+<div class="wrap">
+  <div class="stage">
+    <video id="video" autoplay muted playsinline></video>
+    <canvas id="overlay"></canvas>
+    <canvas id="hands"></canvas>
+  </div>
+
+  <div class="panel">
+    <h2>Face</h2>
+    <div class="emoji" id="f-emoji">⏳</div>
+    <div class="verdict" id="f-verdict">Loading…</div>
+    <div class="conf" id="f-conf"></div>
+    <div id="f-bars"></div>
+  </div>
+
+  <div class="panel">
+    <h2>Voice</h2>
+    <div class="emoji" id="v-emoji">🎙️</div>
+    <div class="verdict" id="v-verdict">Off</div>
+    <div class="conf" id="v-conf"></div>
+    <div class="level"><i id="v-level"></i></div>
+    <div id="v-bars"></div>
+    <button id="v-start">Start voice analysis</button>
+    <div class="note" id="v-note">Downloads a ~95 MB model on first use.</div>
+  </div>
+
+  <div class="panel">
+    <h2>Hands</h2>
+    <div class="emoji" id="h-emoji">⏳</div>
+    <div class="verdict" id="h-verdict">Loading…</div>
+    <div class="conf" id="h-conf"></div>
+    <div class="hand" id="h-Left"><b>Left hand</b>not visible</div>
+    <div class="hand" id="h-Right"><b>Right hand</b>not visible</div>
+    <div class="hand"><b>Recent</b><div class="events" id="h-events">—</div></div>
+  </div>
+</div>
+
+<div class="panel explain">
+  <h2>What are they doing? (AI)</h2>
+  <div class="controls">
+    <button id="x-btn">Explain now</button>
+    <label><input type="checkbox" id="x-auto"> Auto-explain every 8 s</label>
+  </div>
+  <div class="note">Sends one snapshot plus the readings above to OpenAI. Each explanation is a paid call; auto mode makes one every 8 s.</div>
+  <div id="x-out"></div>
+</div>
+<div id="status">Requesting camera…</div>
+
+<script type="module">
+import { pipeline } from 'https://cdn.jsdelivr.net/npm/@huggingface/transformers@4.3.0/dist/transformers.min.js';
+import { FilesetResolver, GestureRecognizer, DrawingUtils } from 'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@1.1.0/vision_bundle.mjs';
+
+const $ = id => document.getElementById(id);
+
+const STYLE = {
+  neutral:   { emoji:'😐', color:'#8a94a3' },
+  calm:      { emoji:'😌', color:'#5ec4d6' },
+  happy:     { emoji:'😄', color:'#3ecf8e' },
+  sad:       { emoji:'😢', color:'#4f8cff' },
+  angry:     { emoji:'😠', color:'#f25c54' },
+  fearful:   { emoji:'😨', color:'#b57bff' },
+  disgusted: { emoji:'🤢', color:'#9bc53d' },
+  surprised: { emoji:'😲', color:'#f5a524' },
+};
+// face-api.js expression model: 7 classes
+const FACE_KEYS = ['neutral','happy','sad','angry','fearful','disgusted','surprised'];
+// Speech model: 8 classes, with its short labels mapped to the same names as the face model
+const VOICE_MAP = { NEU:'neutral', CAL:'calm', HAP:'happy', SAD:'sad', ANG:'angry', FEA:'fearful', DIS:'disgusted', SUR:'surprised' };
+const VOICE_KEYS = Object.values(VOICE_MAP);
+
+// Latest face/voice reading as text, for the AI explanation
+const latest = { f: 'not loaded yet', v: 'off' };
+
+function makeBars(prefix, keys) {
+  $(`${prefix}-bars`).innerHTML = keys.map(k =>
+    `<div class="row"><span>${k}</span><div class="bar"><i id="${prefix}-b-${k}" style="background:${STYLE[k].color}"></i></div><span id="${prefix}-v-${k}">0%</span></div>`
+  ).join('');
+}
+function show(prefix, keys, scores) {
+  const top = keys.reduce((a, b) => scores[b] > scores[a] ? b : a);
+  $(`${prefix}-emoji`).textContent = STYLE[top].emoji;
+  $(`${prefix}-verdict`).textContent = top;
+  $(`${prefix}-verdict`).style.color = STYLE[top].color;
+  $(`${prefix}-conf`).textContent = `${(scores[top] * 100).toFixed(0)}% probability`;
+  for (const k of keys) {
+    $(`${prefix}-b-${k}`).style.width = (scores[k] * 100).toFixed(0) + '%';
+    $(`${prefix}-v-${k}`).textContent = (scores[k] * 100).toFixed(0) + '%';
+  }
+  latest[prefix] = `${top} (${(scores[top] * 100).toFixed(0)}%)`;
+  return top;
+}
+function idle(prefix, emoji, text) {
+  $(`${prefix}-emoji`).textContent = emoji;
+  $(`${prefix}-verdict`).textContent = text;
+  $(`${prefix}-verdict`).style.color = '';
+  $(`${prefix}-conf`).textContent = '';
+  latest[prefix] = text.toLowerCase();
+}
+makeBars('f', FACE_KEYS);
+makeBars('v', VOICE_KEYS);
+
+// Exponential moving average to stop labels flickering between updates
+function makeSmoother(keys, alpha) {
+  const s = {};
+  return scores => { for (const k of keys) s[k] = s[k] == null ? scores[k] : alpha * scores[k] + (1 - alpha) * s[k]; return s; };
+}
+
+/* ---------------- Camera ---------------- */
+const video = $('video');
+
+async function startCamera() {
+  video.srcObject = await navigator.mediaDevices.getUserMedia({ video: { width: 640, height: 480 } });
+  await new Promise(r => video.onloadedmetadata = r);
+  for (const c of [$('overlay'), $('hands')]) { c.width = video.videoWidth; c.height = video.videoHeight; }
+  $('status').textContent = 'Running. Face, voice and hand detection run locally in your browser; only "Explain" sends anything out.';
+}
+
+/* ---------------- Face ---------------- */
+const FACE_MODEL_URL = 'https://cdn.jsdelivr.net/npm/@vladmandic/face-api@1.7.15/model/';
+const FACE_INTERVAL_MS = 80;   // ~12 checks a second is plenty and leaves the GPU free for hand tracking
+const canvas = $('overlay');
+const ctx = canvas.getContext('2d');
+const faceSmooth = makeSmoother(FACE_KEYS, 0.3);
+const detectorOpts = new faceapi.TinyFaceDetectorOptions({ inputSize: 320, scoreThreshold: 0.5 });
+
+async function startFace() {
+  try {
+    await Promise.all([
+      faceapi.nets.tinyFaceDetector.loadFromUri(FACE_MODEL_URL),
+      faceapi.nets.faceExpressionNet.loadFromUri(FACE_MODEL_URL),
+    ]);
+    faceLoop();
+  } catch (err) {
+    idle('f', '⚠️', 'Error');
+    $('status').textContent = 'Face: ' + (err.message || err);
+    console.error(err);
+  }
+}
+
+async function faceLoop() {
+  const started = performance.now();
+  try {
+    const det = await faceapi.detectSingleFace(video, detectorOpts).withFaceExpressions();
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    if (det) {
+      const top = show('f', FACE_KEYS, faceSmooth(det.expressions));
+      const b = det.detection.box;
+      ctx.strokeStyle = STYLE[top].color;
+      ctx.lineWidth = 3;
+      ctx.strokeRect(b.x, b.y, b.width, b.height);
+    } else {
+      idle('f', '🙈', 'No face');
+    }
+  } catch (err) {
+    // Keep going: one bad frame shouldn't freeze the panel on a stale reading
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    idle('f', '⚠️', 'Error');
+    console.error(err);
+  }
+  setTimeout(faceLoop, Math.max(0, FACE_INTERVAL_MS - (performance.now() - started)));
+}
+
+/* ---------------- Voice ---------------- */
+const VOICE_MODEL = 'onnx-community/Speech-Emotion-Classification-ONNX';
+const TARGET_SR = 16000;       // the model expects 16 kHz mono audio
+const WINDOW_SEC = 3;          // how much recent audio each prediction looks at
+const SILENCE_RMS = 0.01;      // below this the window counts as silence
+const voiceSmooth = makeSmoother(VOICE_KEYS, 0.5);
+
+let ring, filled = 0, nativeSR;
+
+// Runs on the audio thread: collects the mic's 128-sample blocks into 4096-sample chunks
+// and posts each chunk to the page. Outputs are left empty, so it plays nothing.
+const MIC_WORKLET = `
+registerProcessor('mic-tap', class extends AudioWorkletProcessor {
+  constructor() { super(); this.buf = new Float32Array(4096); this.n = 0; }
+  process(inputs) {
+    const ch = inputs[0][0];
+    if (ch) {
+      for (let i = 0; i < ch.length; i++) {
+        this.buf[this.n++] = ch[i];
+        if (this.n === this.buf.length) { this.port.postMessage(this.buf.slice()); this.n = 0; }
+      }
+    }
+    return true;
+  }
+});`;
+
+function rms(a) { let s = 0; for (let i = 0; i < a.length; i++) s += a[i] * a[i]; return Math.sqrt(s / a.length); }
+
+// Linear-interpolation resample from the mic's native rate down to 16 kHz
+function resample(input, fromSR, toSR) {
+  if (fromSR === toSR) return input;
+  const ratio = fromSR / toSR, out = new Float32Array(Math.floor(input.length / ratio));
+  for (let i = 0; i < out.length; i++) {
+    const x = i * ratio, i0 = Math.floor(x), i1 = Math.min(i0 + 1, input.length - 1);
+    out[i] = input[i0] + (input[i1] - input[i0]) * (x - i0);
+  }
+  return out;
+}
+
+async function startVoice() {
+  const btn = $('v-start');
+  btn.disabled = true;
+  try {
+    btn.textContent = 'Loading voice model…';
+    idle('v', '⏳', 'Loading…');
+    const classifier = await pipeline('audio-classification', VOICE_MODEL, {
+      dtype: 'q8',
+      progress_callback: p => {
+        if (p.status === 'progress' && p.file.endsWith('.onnx')) {
+          $('v-conf').textContent = `Downloading model… ${p.progress.toFixed(0)}%`;
+        }
+      },
+    });
+
+    btn.textContent = 'Requesting microphone…';
+    const mic = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true } });
+    const audioCtx = new AudioContext();
+    nativeSR = audioCtx.sampleRate;
+    ring = new Float32Array(WINDOW_SEC * nativeSR);
+
+    const workletUrl = URL.createObjectURL(new Blob([MIC_WORKLET], { type: 'text/javascript' }));
+    await audioCtx.audioWorklet.addModule(workletUrl);
+    URL.revokeObjectURL(workletUrl);
+
+    const src = audioCtx.createMediaStreamSource(mic);
+    const proc = new AudioWorkletNode(audioCtx, 'mic-tap', { numberOfInputs: 1, numberOfOutputs: 1, channelCount: 1 });
+    proc.port.onmessage = ({ data: d }) => {
+      ring.copyWithin(0, d.length);
+      ring.set(d, ring.length - d.length);
+      filled = Math.min(ring.length, filled + d.length);
+      $('v-level').style.width = Math.min(100, rms(d) * 800) + '%';
+    };
+    src.connect(proc);
+    proc.connect(audioCtx.destination); // output stays silent; keeps the node in the rendered graph
+
+    btn.textContent = 'Listening';
+    idle('v', '👂', 'Listening…');
+    voiceLoop(classifier);
+  } catch (err) {
+    idle('v', '⚠️', 'Error');
+    $('v-note').textContent = 'Voice: ' + (err.message || err);
+    btn.textContent = 'Start voice analysis';
+    btn.disabled = false;
+    console.error(err);
+  }
+}
+
+async function voiceLoop(classifier) {
+  while (true) {
+    await new Promise(r => setTimeout(r, 750));
+    if (filled < ring.length) continue;
+    const win = ring.slice();
+    if (rms(win) < SILENCE_RMS) { idle('v', '🤫', 'Too quiet'); continue; }
+
+    try {
+      const out = await classifier(resample(win, nativeSR, TARGET_SR), { top_k: null });
+      const scores = {};
+      for (const { label, score } of out) scores[VOICE_MAP[label] ?? label.toLowerCase()] = score;
+      show('v', VOICE_KEYS, voiceSmooth(scores));
+    } catch (err) {
+      // Keep listening: show the error instead of freezing on the last reading
+      idle('v', '⚠️', 'Error');
+      console.error(err);
+    }
+  }
+}
+
+/* ---------------- Hands ---------------- */
+const MP_WASM = 'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@1.1.0/wasm';
+const GESTURE_MODEL = 'https://storage.googleapis.com/mediapipe-models/gesture_recognizer/gesture_recognizer/float16/1/gesture_recognizer.task';
+// MediaPipe's 7 built-in gestures, plus None
+const GESTURES = {
+  Open_Palm:   { emoji:'✋', name:'open palm' },
+  Closed_Fist: { emoji:'✊', name:'closed fist' },
+  Pointing_Up: { emoji:'☝️', name:'pointing up' },
+  Thumb_Up:    { emoji:'👍', name:'thumbs up' },
+  Thumb_Down:  { emoji:'👎', name:'thumbs down' },
+  Victory:     { emoji:'✌️', name:'victory / peace' },
+  ILoveYou:    { emoji:'🤟', name:'I love you' },
+  None:        { emoji:'🖐️', name:'no known gesture' },
+};
+const HAND_COLOR = { Left:'#4f8cff', Right:'#f5a524' };
+const STABLE_FRAMES = 4;    // a gesture must repeat this many frames before the label changes
+const TRACK_MS = 1500;      // wrist history kept for motion analysis
+const MIN_SWING = 0.04;     // smallest side-to-side stroke that counts, as a fraction of frame width
+const SWIPE_MS = 500, SWIPE_DIST = 0.25;
+
+const hctx = $('hands').getContext('2d');
+const drawer = new DrawingUtils(hctx);
+// Per hand: displayed gesture, candidate gesture + streak, wrist track, motion label
+const hands = { Left: newHand(), Right: newHand() };
+const events = [];   // { t, text } of recent changes, for the panel and for the AI
+let recognizer, lastVideoTime = -1;
+
+function newHand() { return { visible:false, gesture:'None', score:0, cand:null, streak:0, track:[], motion:'', motionUntil:0 }; }
+
+function logEvent(text) {
+  events.push({ t: performance.now(), text });
+  while (events.length > 8) events.shift();
+}
+
+async function startHands() {
+  try {
+    const fileset = await FilesetResolver.forVisionTasks(MP_WASM);
+    recognizer = await GestureRecognizer.createFromOptions(fileset, {
+      baseOptions: { modelAssetPath: GESTURE_MODEL, delegate: 'GPU' },
+      runningMode: 'VIDEO',
+      numHands: 2,
+    });
+    $('h-emoji').textContent = '🙌';
+    $('h-verdict').textContent = 'No hands';
+    handLoop();
+  } catch (err) {
+    $('h-emoji').textContent = '⚠️';
+    $('h-verdict').textContent = 'Error';
+    $('h-conf').textContent = err.message || String(err);
+    console.error(err);
+  }
+}
+
+// Counts direction reversals of the wrist's x position: 2+ reversals within 1.5 s is a wave
+function countSwings(track) {
+  let dir = 0, ext = track[0].x, swings = 0;
+  for (const { x } of track) {
+    if (dir === 0) { if (Math.abs(x - ext) > MIN_SWING) { dir = Math.sign(x - ext); ext = x; } }
+    else if ((x - ext) * dir > 0) ext = x;                                   // same direction: extend the stroke
+    else if (Math.abs(x - ext) > MIN_SWING) { dir = -dir; ext = x; swings++; } // turned around
+  }
+  return swings;
+}
+
+function analyseMotion(h, now) {
+  const tr = h.track;
+  let motion = '';
+  if (tr.length > 5 && countSwings(tr) >= 2) motion = 'waving';
+  else {
+    const recent = tr.filter(p => now - p.t < SWIPE_MS);
+    if (recent.length > 3) {
+      const dx = recent.at(-1).x - recent[0].x, dy = recent.at(-1).y - recent[0].y;
+      // Image x grows toward the person's own left (the raw webcam frame isn't mirrored)
+      if (Math.abs(dx) > SWIPE_DIST && Math.abs(dx) > Math.abs(dy)) motion = dx > 0 ? 'swipe to their left' : 'swipe to their right';
+      else if (Math.abs(dy) > SWIPE_DIST) motion = dy < 0 ? 'moving up' : 'moving down';
+    }
+  }
+  if (motion) {
+    if (motion !== h.motion) logEvent(`${h.side} hand ${motion}`);
+    h.motion = motion;
+    h.motionUntil = now + 800;   // hold the label briefly so it doesn't blink
+  } else if (now > h.motionUntil) {
+    h.motion = '';
+  }
+}
+
+function updateHand(side, lm, g, now) {
+  const h = hands[side];
+  h.side = side.toLowerCase();
+  if (!h.visible) logEvent(`${h.side} hand appeared`);
+  h.visible = true;
+  h.track.push({ t: now, x: lm[0].x, y: lm[0].y });
+  while (h.track.length && now - h.track[0].t > TRACK_MS) h.track.shift();
+
+  const name = g?.categoryName || 'None';
+  h.streak = name === h.cand ? h.streak + 1 : 1;
+  h.cand = name;
+  if (h.streak >= STABLE_FRAMES && name !== h.gesture) {
+    h.gesture = name;
+    if (name !== 'None') logEvent(`${h.side} hand ${GESTURES[name].name}`);
+  }
+  if (name === h.gesture) h.score = g?.score ?? 0;
+  analyseMotion(h, now);
+}
+
+function handText(h) {
+  if (!h.visible) return 'not visible';
+  const g = GESTURES[h.gesture] ?? GESTURES.None;
+  return `${g.emoji} ${g.name}` + (h.gesture !== 'None' ? ` (${(h.score * 100).toFixed(0)}%)` : '') + (h.motion ? ` · ${h.motion}` : '');
+}
+
+function renderHands(now) {
+  const vis = ['Right', 'Left'].map(s => hands[s]).filter(h => h.visible);
+  const waving = vis.find(h => h.motion === 'waving');
+  const main = waving || vis.find(h => h.gesture !== 'None') || vis[0];
+  if (!main) { $('h-emoji').textContent = '🙌'; $('h-verdict').textContent = 'No hands'; $('h-conf').textContent = ''; }
+  else if (waving) { $('h-emoji').textContent = '👋'; $('h-verdict').textContent = 'Waving!'; $('h-conf').textContent = `${main.side} hand`; }
+  else {
+    const g = GESTURES[main.gesture] ?? GESTURES.None;
+    $('h-emoji').textContent = g.emoji;
+    $('h-verdict').textContent = main.motion || g.name;
+    $('h-conf').textContent = main.gesture !== 'None' ? `${main.side} hand · ${(main.score * 100).toFixed(0)}%` : `${main.side} hand`;
+  }
+  for (const s of ['Left', 'Right']) $(`h-${s}`).innerHTML = `<b>${s} hand</b>${handText(hands[s])}`;
+  $('h-events').innerHTML = events.length
+    ? events.slice(-4).reverse().map(e => `${((now - e.t) / 1000).toFixed(0)}s ago: ${e.text}`).join('<br>')
+    : '—';
+}
+
+function handLoop() {
+  if (video.currentTime !== lastVideoTime) {
+    lastVideoTime = video.currentTime;
+    const now = performance.now();
+    const res = recognizer.recognizeForVideo(video, now);
+    hctx.clearRect(0, 0, hctx.canvas.width, hctx.canvas.height);
+    const seen = new Set();
+    res.landmarks.forEach((lm, i) => {
+      // MediaPipe labels handedness as if the frame were mirrored (selfie view); ours isn't, so swap
+      const side = res.handedness[i]?.[0]?.categoryName === 'Left' ? 'Right' : 'Left';
+      if (seen.has(side)) return;
+      seen.add(side);
+      updateHand(side, lm, res.gestures[i]?.[0], now);
+      drawer.drawConnectors(lm, GestureRecognizer.HAND_CONNECTIONS, { color: HAND_COLOR[side], lineWidth: 3 });
+      drawer.drawLandmarks(lm, { color: '#ffffff', lineWidth: 1, radius: 3 });
+    });
+    for (const s of ['Left', 'Right']) {
+      if (!seen.has(s) && hands[s].visible) { logEvent(`${s.toLowerCase()} hand left the frame`); hands[s] = newHand(); }
+    }
+    renderHands(now);
+  }
+  requestAnimationFrame(handLoop);
+}
+
+/* ---------------- Explain (OpenAI via server.py) ---------------- */
+const AUTO_MS = 8000;
+const NO_CAMERA_MSG = 'No camera image yet. Allow camera access and reload the page.';
+let explaining = false;
+
+function buildReadings() {
+  const now = performance.now();
+  const lines = [
+    `Hands now (the person's own left/right): left: ${handText(hands.Left)}; right: ${handText(hands.Right)}`,
+    'Recent hand events, oldest first: ' + (events.length
+      ? events.map(e => `${((now - e.t) / 1000).toFixed(1)}s ago ${e.text}`).join('; ')
+      : 'none'),
+    `Face expression: ${latest.f}`,
+    `Voice emotion: ${latest.v}`,
+  ];
+  return lines.join('\n');
+}
+
+function addResult(text, isError) {
+  const out = $('x-out');
+  for (const d of out.children) d.classList.add('old');
+  const div = document.createElement('div');
+  div.innerHTML = `<small>${new Date().toLocaleTimeString()}</small>`;
+  const span = document.createElement('span');
+  span.textContent = text;
+  if (isError) span.className = 'err';
+  div.appendChild(span);
+  out.prepend(div);
+  while (out.children.length > 5) out.lastChild.remove();
+}
+
+async function explainNow() {
+  if (explaining) return;
+  if (!video.videoWidth) {
+    // Don't repeat the message every 8 s in auto mode
+    if ($('x-out').firstElementChild?.textContent.endsWith(NO_CAMERA_MSG) !== true) addResult(NO_CAMERA_MSG, true);
+    return;
+  }
+  explaining = true;
+  const btn = $('x-btn');
+  btn.disabled = true;
+  btn.textContent = 'Thinking…';
+  try {
+    const snap = document.createElement('canvas');
+    snap.width = video.videoWidth;
+    snap.height = video.videoHeight;
+    snap.getContext('2d').drawImage(video, 0, 0);
+    const image = snap.toDataURL('image/jpeg', 0.7).split(',')[1];
+    const res = await fetch('/api/explain', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ image, readings: buildReadings() }),
+    });
+    const data = await res.json().catch(() => ({ error: `Server replied ${res.status}. Start the page with "python server.py", not "python -m http.server".` }));
+    if (data.error) addResult(data.error, true);
+    else addResult(data.text, false);
+  } catch (err) {
+    addResult('Could not reach server.py: ' + (err.message || err), true);
+  } finally {
+    explaining = false;
+    btn.disabled = false;
+    btn.textContent = 'Explain now';
+  }
+}
+
+// Explain needs server.py, which only accepts requests from localhost. On a static
+// host (e.g. GitHub Pages) there is no server, so hide the panel instead.
+if (['localhost', '127.0.0.1'].includes(location.hostname)) {
+  $('x-btn').addEventListener('click', explainNow);
+  setInterval(() => { if ($('x-auto').checked) explainNow(); }, AUTO_MS);
+} else {
+  document.querySelector('.panel.explain').style.display = 'none';
+}
+
+/* ---------------- Start ---------------- */
+$('v-start').addEventListener('click', startVoice);
+try {
+  await startCamera();
+  startFace();
+  startHands();
+} catch (err) {
+  idle('f', '⚠️', 'No camera');
+  $('h-emoji').textContent = '⚠️';
+  $('h-verdict').textContent = 'No camera';
+  $('status').textContent = 'Camera: ' + (err.message || err);
+  console.error(err);
+}
+</script>
+</body>
+</html>
