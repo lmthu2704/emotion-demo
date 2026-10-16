@@ -42,6 +42,14 @@
   #x-out div.old { opacity:.55; font-size:12px; }
   #x-out .err { color:#f25c54; }
   #status { color:var(--muted); font-size:11px; margin-top:8px; }
+  .explain .cost { font-size:12px; color:var(--muted); font-variant-numeric:tabular-nums; }
+  #b-log { margin-top:8px; max-height:280px; overflow-y:auto; display:flex; flex-direction:column; gap:5px; font-size:14px; line-height:1.4; }
+  #b-log:empty { display:none; }
+  #b-log b { font-size:10px; letter-spacing:.06em; text-transform:uppercase; margin-right:8px; }
+  #b-log .you b { color:#4f8cff; }
+  #b-log .bot b { color:#3ecf8e; }
+  #b-log .hint { color:var(--muted); font-size:11px; }
+  #b-log .err { color:#f25c54; font-size:12px; }
 </style>
 </head>
 <body>
@@ -83,7 +91,18 @@
   </div>
 </div>
 
-<div class="panel explain">
+<div class="panel explain" id="bot-panel" hidden>
+  <h2>Talk to the bot (AI)</h2>
+  <div class="controls">
+    <button id="b-btn">Start talking</button>
+    <span class="cost" id="b-cost"></span>
+  </div>
+  <div class="note">Voice chat through OpenAI's Realtime API. After each thing you say, the bot gets a one-line summary of the face and voice readings above and adjusts its tone. Your voice and that summary go to OpenAI; the video doesn't. Starting also turns on voice analysis. Billed per use; the counter shows an estimate.</div>
+  <div id="b-log"></div>
+  <audio id="b-audio" autoplay></audio>
+</div>
+
+<div class="panel explain" id="explain-panel" hidden>
   <h2>What are they doing? (AI)</h2>
   <div class="controls">
     <button id="x-btn">Explain now</button>
@@ -118,6 +137,9 @@ const VOICE_KEYS = Object.values(VOICE_MAP);
 
 // Latest face/voice reading as text, for the AI explanation
 const latest = { f: 'not loaded yet', v: 'off' };
+// Recent face/voice scores, so the bot can be told about a whole turn rather than one instant
+const HISTORY_MS = 60000;
+const history = { f: [], v: [] };
 
 function makeBars(prefix, keys) {
   $(`${prefix}-bars`).innerHTML = keys.map(k =>
@@ -135,7 +157,20 @@ function show(prefix, keys, scores) {
     $(`${prefix}-v-${k}`).textContent = (scores[k] * 100).toFixed(0) + '%';
   }
   latest[prefix] = `${top} (${(scores[top] * 100).toFixed(0)}%)`;
+  const now = performance.now();
+  history[prefix].push({ t: now, scores: { ...scores } });
+  while (history[prefix][0].t < now - HISTORY_MS) history[prefix].shift();
   return top;
+}
+// Average scores since a time, as "sad 62%, neutral 25%" (the second emotion only if it's notable)
+function summarize(prefix, keys, since) {
+  const recent = history[prefix].filter(r => r.t >= since);
+  if (!recent.length) return null;
+  const avg = {};
+  for (const k of keys) avg[k] = recent.reduce((sum, r) => sum + (r.scores[k] ?? 0), 0) / recent.length;
+  const [a, b] = [...keys].sort((x, y) => avg[y] - avg[x]);
+  const pct = k => `${k} ${(avg[k] * 100).toFixed(0)}%`;
+  return avg[b] >= 0.2 ? `${pct(a)}, ${pct(b)}` : pct(a);
 }
 function idle(prefix, emoji, text) {
   $(`${prefix}-emoji`).textContent = emoji;
@@ -156,11 +191,20 @@ function makeSmoother(keys, alpha) {
 /* ---------------- Camera ---------------- */
 const video = $('video');
 
+// Advice for the usual camera/mic failures, whose raw messages ("Could not start video source") don't say what to do
+function mediaAdvice(err, device) {
+  const D = device[0].toUpperCase() + device.slice(1);
+  if (err.name === 'NotAllowedError') return `${D} access is blocked. Allow it from the icon in the address bar, then reload.`;
+  if (err.name === 'NotFoundError') return `No ${device} found.`;
+  if (err.name === 'NotReadableError') return `${D} couldn't start. Another app or tab may be using it, or this browser can't reach it (VS Code's built-in browser often can't). Close the other app, or open the page in Chrome or Edge, then reload.`;
+  return null;
+}
+
 async function startCamera() {
   video.srcObject = await navigator.mediaDevices.getUserMedia({ video: { width: 640, height: 480 } });
   await new Promise(r => video.onloadedmetadata = r);
   for (const c of [$('overlay'), $('hands')]) { c.width = video.videoWidth; c.height = video.videoHeight; }
-  $('status').textContent = 'Running. Face, voice and hand detection run locally in your browser; only "Explain" sends anything out.';
+  $('status').textContent = 'Running. Face, voice and hand detection run locally in your browser; only the bot and "Explain" send anything out.';
 }
 
 /* ---------------- Face ---------------- */
@@ -216,6 +260,15 @@ const SILENCE_RMS = 0.01;      // below this the window counts as silence
 const voiceSmooth = makeSmoother(VOICE_KEYS, 0.5);
 
 let ring, filled = 0, nativeSR;
+let botSpeaking = false;   // set by the bot section while its reply is playing
+
+// One microphone stream, shared by voice analysis and the bot
+let micPromise = null;
+function getMic() {
+  micPromise ??= navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true } })
+    .catch(err => { micPromise = null; throw err; });
+  return micPromise;
+}
 
 // Runs on the audio thread: collects the mic's 128-sample blocks into 4096-sample chunks
 // and posts each chunk to the page. Outputs are left empty, so it plays nothing.
@@ -263,7 +316,7 @@ async function startVoice() {
     });
 
     btn.textContent = 'Requesting microphone…';
-    const mic = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true } });
+    const mic = await getMic();
     const audioCtx = new AudioContext();
     nativeSR = audioCtx.sampleRate;
     ring = new Float32Array(WINDOW_SEC * nativeSR);
@@ -288,7 +341,7 @@ async function startVoice() {
     voiceLoop(classifier);
   } catch (err) {
     idle('v', '⚠️', 'Error');
-    $('v-note').textContent = 'Voice: ' + (err.message || err);
+    $('v-note').textContent = mediaAdvice(err, 'microphone') ?? 'Voice: ' + (err.message || err);
     btn.textContent = 'Start voice analysis';
     btn.disabled = false;
     console.error(err);
@@ -298,12 +351,15 @@ async function startVoice() {
 async function voiceLoop(classifier) {
   while (true) {
     await new Promise(r => setTimeout(r, 750));
+    // The bot's voice leaks into the mic, so don't score it as the user's
+    if (botSpeaking) { idle('v', '🤖', 'Bot talking'); continue; }
     if (filled < ring.length) continue;
     const win = ring.slice();
     if (rms(win) < SILENCE_RMS) { idle('v', '🤫', 'Too quiet'); continue; }
 
     try {
       const out = await classifier(resample(win, nativeSR, TARGET_SR), { top_k: null });
+      if (botSpeaking) continue;
       const scores = {};
       for (const { label, score } of out) scores[VOICE_MAP[label] ?? label.toLowerCase()] = score;
       show('v', VOICE_KEYS, voiceSmooth(scores));
@@ -499,6 +555,16 @@ function addResult(text, isError) {
   while (out.children.length > 5) out.lastChild.remove();
 }
 
+// POSTs to server.py and returns its JSON reply, which has "error" if something went wrong
+async function callServer(path, body) {
+  const res = await fetch(path, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+  return res.json().catch(() => ({ error: `Server replied ${res.status}. Start the page with "python server.py", not "python -m http.server".` }));
+}
+
 async function explainNow() {
   if (explaining) return;
   if (!video.videoWidth) {
@@ -516,14 +582,11 @@ async function explainNow() {
     snap.height = video.videoHeight;
     snap.getContext('2d').drawImage(video, 0, 0);
     const image = snap.toDataURL('image/jpeg', 0.7).split(',')[1];
-    const res = await fetch('/api/explain', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ image, readings: buildReadings() }),
-    });
-    const data = await res.json().catch(() => ({ error: `Server replied ${res.status}. Start the page with "python server.py", not "python -m http.server".` }));
-    if (data.error) addResult(data.error, true);
-    else addResult(data.text, false);
+    const data = await callServer('/api/explain', { image, readings: buildReadings() });
+    if (data.error) {
+      addResult(data.error, true);
+      $('x-auto').checked = false;   // don't repeat a failing call every 8 s
+    } else addResult(data.text, false);
   } catch (err) {
     addResult('Could not reach server.py: ' + (err.message || err), true);
   } finally {
@@ -533,14 +596,203 @@ async function explainNow() {
   }
 }
 
-// Explain needs server.py, which only accepts requests from localhost. On a static
-// host (e.g. GitHub Pages) there is no server, so hide the panel instead.
-if (['localhost', '127.0.0.1'].includes(location.hostname)) {
-  $('x-btn').addEventListener('click', explainNow);
-  setInterval(() => { if ($('x-auto').checked) explainNow(); }, AUTO_MS);
-} else {
-  document.querySelector('.panel.explain').style.display = 'none';
+/* ---------------- Talk to the bot (OpenAI Realtime via server.py) ---------------- */
+// USD per 1M tokens from OpenAI's pricing page (October 2026), for the running cost estimate
+const PRICES = {
+  'gpt-realtime-2.1-mini': { audioIn: 10, audioCached: 0.30, textIn: 0.60, textCached: 0.06, audioOut: 20, textOut: 2.40 },
+  'gpt-realtime-2.1':      { audioIn: 32, audioCached: 0.40, textIn: 4.00, textCached: 0.40, audioOut: 64, textOut: 24 },
+};
+const TRANSCRIBE_PER_MIN = 0.003;   // gpt-4o-mini-transcribe, for the "You" lines in the log
+const AUDIO_TOKENS_PER_SEC = 10;    // OpenAI counts user audio as about 1 token per 100 ms
+const INSTRUCTION_TOKENS = 300;     // about the size of BOT_INSTRUCTIONS in server.py
+let bot = null;   // the open session, see startBot()
+
+function emotionNote(since) {
+  const face = summarize('f', FACE_KEYS, since) ?? 'not visible';
+  const voice = summarize('v', VOICE_KEYS, since) ?? (latest.v === 'off' ? 'off' : 'no reading');
+  return `Emotion detectors during the user's last turn (often wrong): face ${face}; voice ${voice}.`;
 }
+
+function botSend(event) {
+  if (bot?.dc.readyState === 'open') bot.dc.send(JSON.stringify(event));
+}
+
+// Adds the readings since `since` to the conversation, then asks for a reply. The session doesn't
+// reply on its own (create_response is off in server.py), so every reply sees a fresh note.
+function replyWithNote(since) {
+  const note = emotionNote(since);
+  botSend({ type: 'conversation.item.create', item: { type: 'message', role: 'system', content: [{ type: 'input_text', text: note }] } });
+  botSend({ type: 'response.create' });
+  bot.newText += note.length / 4;
+  botLog('hint', '', note);
+}
+
+// Appends a line to the conversation log and returns its text span, so streamed text can be added later
+function botLog(cls, label, text) {
+  const div = document.createElement('div');
+  div.className = cls;
+  if (label) div.innerHTML = `<b>${label}</b>`;
+  const span = document.createElement('span');
+  span.textContent = text;
+  div.appendChild(span);
+  const log = $('b-log');
+  log.appendChild(div);
+  log.scrollTop = log.scrollHeight;
+  return span;
+}
+
+// Cost of one reply from its usage report. Every reply re-reads the whole conversation as input.
+function replyCost(u, p) {
+  const n = v => v ?? 0;
+  const out = u.output_token_details ?? {};
+  const audioOut = n(out.audio_tokens), textOut = n(u.output_tokens) - audioOut;   // text includes reasoning
+  let input;
+  if (n(u.input_tokens) > 0) {
+    const inp = u.input_token_details ?? {}, cached = inp.cached_tokens_details ?? {};
+    input = (n(inp.audio_tokens) - n(cached.audio_tokens)) * p.audioIn + n(cached.audio_tokens) * p.audioCached
+          + (n(inp.text_tokens) - n(cached.text_tokens)) * p.textIn + n(cached.text_tokens) * p.textCached;
+  } else {
+    // gpt-realtime-2.1-mini reported 0 input tokens when tested (October 2026), so estimate them:
+    // what's new since the last reply at full price, the earlier conversation at the cached price
+    input = bot.newAudio * p.audioIn + bot.newText * p.textIn + bot.ctxAudio * p.audioCached + bot.ctxText * p.textCached;
+  }
+  bot.ctxAudio += bot.newAudio + audioOut;
+  bot.ctxText += bot.newText + textOut - n(out.reasoning_tokens);
+  bot.newAudio = bot.newText = 0;
+  return (input + audioOut * p.audioOut + textOut * p.textOut) / 1e6;
+}
+
+function showBotCost() {
+  const s = Math.floor((performance.now() - bot.started) / 1000);
+  const time = `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`;
+  const cost = bot.cost + bot.spokenMs / 60000 * TRANSCRIBE_PER_MIN;
+  $('b-cost').textContent = PRICES[bot.model] ? `${time} · about $${cost.toFixed(3)} so far` : `${time} · no prices listed for ${bot.model}`;
+}
+
+function onBotEvent(ev) {
+  switch (ev.type) {
+    case 'session.created':
+      replyWithNote(performance.now() - 3000);   // the greeting, toned to how the user looks right now
+      break;
+    case 'input_audio_buffer.speech_started':
+      bot.turnStart = performance.now();
+      break;
+    case 'input_audio_buffer.speech_stopped': {
+      const ms = performance.now() - bot.turnStart;
+      bot.spokenMs += ms;
+      bot.newAudio += ms / 1000 * AUDIO_TOKENS_PER_SEC;
+      break;
+    }
+    case 'input_audio_buffer.committed':
+      bot.lines.set(ev.item_id, botLog('you', 'You', '…'));
+      // At least 3 s of readings, so a quick "yes" still gets a voice reading
+      replyWithNote(Math.min(bot.turnStart, performance.now() - 3000));
+      break;
+    case 'conversation.item.input_audio_transcription.completed':
+    case 'conversation.item.input_audio_transcription.failed': {
+      const span = bot.lines.get(ev.item_id);
+      if (span) span.textContent = ev.transcript?.trim() || '(could not transcribe)';
+      break;
+    }
+    case 'response.output_audio_transcript.delta': {
+      let span = bot.lines.get(ev.item_id);
+      if (!span) bot.lines.set(ev.item_id, span = botLog('bot', 'Bot', ''));
+      span.textContent += ev.delta;
+      $('b-log').scrollTop = $('b-log').scrollHeight;
+      break;
+    }
+    case 'output_audio_buffer.started':
+      botSpeaking = true;
+      break;
+    case 'output_audio_buffer.stopped':
+    case 'output_audio_buffer.cleared':
+      botSpeaking = false;
+      // Voice analysis waits for a full window of fresh audio, without the bot's voice in it
+      if (ring) { filled = 0; idle('v', '👂', 'Listening…'); }
+      break;
+    case 'response.done': {
+      const p = PRICES[bot.model];
+      if (p && ev.response.usage) bot.cost += replyCost(ev.response.usage, p);
+      showBotCost();
+      if (ev.response.status === 'failed') botLog('err', '', 'Reply failed: ' + (ev.response.status_details?.error?.message || 'unknown error'));
+      break;
+    }
+    case 'error':
+      botLog('err', '', 'OpenAI: ' + ev.error.message);
+      break;
+  }
+}
+
+async function startBot() {
+  const btn = $('b-btn');
+  btn.disabled = true;
+  btn.textContent = 'Connecting…';
+  $('b-log').textContent = '';
+  $('b-cost').textContent = '';
+  if (!$('v-start').disabled) startVoice();   // the bot gets voice readings too; loads alongside
+  const pc = new RTCPeerConnection();
+  const now = performance.now();
+  bot = {
+    pc, dc: pc.createDataChannel('oai-events'), model: '', timer: 0,
+    started: now, turnStart: now, spokenMs: 0,
+    cost: 0, newAudio: 0, newText: INSTRUCTION_TOKENS, ctxAudio: 0, ctxText: 0,   // tokens, for the estimate
+    lines: new Map(),   // conversation item id -> its text in the log
+  };
+  try {
+    const token = await callServer('/api/realtime-token', {});
+    if (token.error) throw new Error(token.error);
+    bot.model = token.model;
+
+    const mic = await getMic();
+    pc.addTrack(mic.getAudioTracks()[0], mic);
+    pc.ontrack = e => { $('b-audio').srcObject = e.streams[0]; };
+    pc.onconnectionstatechange = () => { if (pc.connectionState === 'failed' && bot?.pc === pc) stopBot('Connection lost.'); };
+    bot.dc.onmessage = e => { if (bot?.pc === pc) onBotEvent(JSON.parse(e.data)); };
+    bot.dc.onclose = () => { if (bot?.pc === pc) stopBot('Disconnected.'); };
+
+    // The short-lived key from server.py lets the browser call OpenAI directly
+    await pc.setLocalDescription(await pc.createOffer());
+    const answer = await fetch('https://api.openai.com/v1/realtime/calls', {
+      method: 'POST',
+      body: pc.localDescription.sdp,
+      headers: { Authorization: `Bearer ${token.key}`, 'Content-Type': 'application/sdp' },
+    });
+    if (!answer.ok) throw new Error(`OpenAI refused the call (${answer.status}): ${(await answer.text()).slice(0, 300)}`);
+    await pc.setRemoteDescription({ type: 'answer', sdp: await answer.text() });
+
+    bot.started = performance.now();
+    bot.timer = setInterval(showBotCost, 1000);
+    btn.textContent = 'Stop talking';
+    btn.disabled = false;
+  } catch (err) {
+    stopBot(mediaAdvice(err, 'microphone') ?? (err.message || String(err)));
+    console.error(err);
+  }
+}
+
+function stopBot(message) {
+  if (!bot) return;
+  clearInterval(bot.timer);
+  if (bot.timer) showBotCost();   // leave the final time and cost on screen
+  const { pc } = bot;
+  bot = null;
+  pc.close();                     // the mic itself stays on for voice analysis
+  $('b-audio').srcObject = null;
+  botSpeaking = false;
+  if (message) botLog('err', '', message);
+  $('b-btn').textContent = 'Start talking';
+  $('b-btn').disabled = false;
+}
+
+$('x-btn').addEventListener('click', explainNow);
+setInterval(() => { if ($('x-auto').checked) explainNow(); }, AUTO_MS);
+$('b-btn').addEventListener('click', () => bot ? stopBot() : startBot());
+
+// Explain and the bot need server.py. On a static host (e.g. GitHub Pages) there is no server, so their
+// panels stay hidden. On localhost they show anyway, so their errors can say how to start server.py.
+fetch('/api/status').then(res => res.ok).catch(() => false).then(running => {
+  if (running || ['localhost', '127.0.0.1'].includes(location.hostname)) $('bot-panel').hidden = $('explain-panel').hidden = false;
+});
 
 /* ---------------- Start ---------------- */
 $('v-start').addEventListener('click', startVoice);
@@ -552,7 +804,7 @@ try {
   idle('f', '⚠️', 'No camera');
   $('h-emoji').textContent = '⚠️';
   $('h-verdict').textContent = 'No camera';
-  $('status').textContent = 'Camera: ' + (err.message || err);
+  $('status').textContent = mediaAdvice(err, 'camera') ?? 'Camera: ' + (err.message || err);
   console.error(err);
 }
 </script>

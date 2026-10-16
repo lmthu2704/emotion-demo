@@ -1,0 +1,16 @@
+# Hosts the demo on Render (render.com), so the link works without your computer (see README).
+# Render asks for the API key and passcode when you create the service; they never go in this repo.
+services:
+  - type: web
+    name: emotion-demo
+    runtime: python
+    plan: free
+    buildCommand: echo "server.py only needs the Python standard library"
+    startCommand: python server.py
+    envVars:
+      - key: HOST
+        value: 0.0.0.0
+      - key: OPENAI_API_KEY
+        sync: false
+      - key: DEMO_PASSCODE
+        sync: false
