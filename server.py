@@ -1,13 +1,12 @@
 """Local server for the emotion demo.
 
-Serves the page, forwards "explain" requests to OpenAI and mints short-lived
-keys for the voice bot, so the real API key stays on this machine instead of
-in the browser.
+Serves the page and mints short-lived keys for the voice bot, so the real
+API key stays on this machine instead of in the browser.
 
 Put your key in a file named .env next to this script:
     OPENAI_API_KEY=sk-...
-Optionally pick different models with OPENAI_MODEL=... (explain) and
-OPENAI_REALTIME_MODEL=... (voice bot); defaults are below.
+Optionally pick a different voice-bot model with OPENAI_REALTIME_MODEL=...;
+the default is below.
 Then run:
     python server.py
 and open http://localhost:8765
@@ -30,23 +29,11 @@ HERE = Path(__file__).resolve().parent
 # A host such as Render sets these so the server is reachable from outside; locally only this machine can reach it
 HOST = os.environ.get("HOST", "127.0.0.1")
 PORT = int(os.environ.get("PORT", "8765"))
-API_URL = "https://api.openai.com/v1/chat/completions"
 REALTIME_URL = "https://api.openai.com/v1/realtime/client_secrets"
-MAX_BODY = 5 * 1024 * 1024  # a 640x480 JPEG snapshot is ~50 KB; reject anything absurd
 # Without a passcode, only the demo page itself may call the /api/ routes, so other sites can't spend the API key
 ALLOWED_ORIGINS = {f"http://localhost:{PORT}", f"http://127.0.0.1:{PORT}"}
 WRONG_LIMIT = 10     # wrong passcodes allowed per WRONG_WINDOW seconds, from everyone together,
 WRONG_WINDOW = 600   # so guessing a passcode of a few words would take years
-
-SYSTEM_PROMPT = """You interpret body language from a webcam demo.
-Each request has one webcam snapshot plus readings from automatic detectors running in the browser:
-hand gestures (MediaPipe), hand motion such as waving, face expression and voice emotion.
-The detectors are often wrong; when they disagree with the image, trust the image.
-
-Reply in 1-3 short, plain sentences: what the person seems to be doing with their hands,
-and what it most likely means (greeting, agreement, counting, pointing at something, etc.).
-Mention the face or voice only if it changes the meaning. If no hands are visible, say so briefly.
-Do not guess identity, age or other personal attributes."""
 
 BOT_INSTRUCTIONS = """You are a friendly voice assistant in a spoken conversation with someone at a webcam.
 Keep replies short: one to three sentences, the way people talk out loud.
@@ -80,7 +67,6 @@ def load_dotenv(path):
 
 load_dotenv(HERE / ".env")
 API_KEY = os.environ.get("OPENAI_API_KEY", "")
-MODEL = os.environ.get("OPENAI_MODEL", "gpt-4.1")
 REALTIME_MODEL = os.environ.get("OPENAI_REALTIME_MODEL", "gpt-realtime-2.1-mini")
 PASSCODE = os.environ.get("DEMO_PASSCODE", "")
 wrong_times = []   # time.monotonic() of each recent wrong passcode
@@ -131,28 +117,6 @@ def call_openai(url, payload):
         raise ApiError(e.code, message) from None
     except (urllib.error.URLError, TimeoutError):
         raise ApiError(0, "") from None
-
-
-def explain(image_b64, readings):
-    payload = {
-        "model": MODEL,
-        "max_completion_tokens": 300,
-        "messages": [
-            {"role": "system", "content": SYSTEM_PROMPT},
-            {"role": "user", "content": [
-                {"type": "text", "text": "Detector readings:\n" + readings},
-                {"type": "image_url", "image_url": {"url": "data:image/jpeg;base64," + image_b64}},
-            ]},
-        ],
-    }
-    data = call_openai(API_URL, payload)
-    try:
-        message = data["choices"][0]["message"]
-    except (KeyError, IndexError, TypeError):
-        raise ApiError(-1, "unexpected response format") from None
-    if message.get("refusal"):
-        return "The model declined to describe this frame."
-    return (message.get("content") or "").strip() or "(no answer)"
 
 
 def realtime_session():
@@ -230,7 +194,7 @@ class Handler(SimpleHTTPRequestHandler):
     def do_POST(self):
         if not self.authorized():
             return
-        if self.path not in ("/api/explain", "/api/realtime-token"):
+        if self.path != "/api/realtime-token":
             self.send_error(404)
             return
         # Browsers always send Origin on POST. Requiring JSON also forces a CORS preflight
@@ -246,21 +210,7 @@ class Handler(SimpleHTTPRequestHandler):
         if not API_KEY:
             self.reply(500, {"error": "No API key. Create a .env file with OPENAI_API_KEY=... and restart server.py."})
             return
-        if self.path == "/api/realtime-token":
-            self.reply_from_openai(realtime_session)
-            return
-        try:
-            length = int(self.headers.get("Content-Length", 0))
-            if not 0 < length <= MAX_BODY:
-                raise ValueError("bad request size")
-            body = json.loads(self.rfile.read(length))
-            image_b64 = body["image"]
-            base64.b64decode(image_b64, validate=True)
-            readings = str(body.get("readings", ""))[:4000]
-        except (ValueError, KeyError, TypeError, binascii.Error):
-            self.reply(400, {"error": "Bad request"})
-            return
-        self.reply_from_openai(lambda: {"text": explain(image_b64, readings)})
+        self.reply_from_openai(realtime_session)
 
     def reply_from_openai(self, fn):
         """Reply with fn()'s result, turning OpenAI failures into messages the page can show."""
@@ -295,6 +245,6 @@ if __name__ == "__main__":
     if HOST not in ("127.0.0.1", "localhost") and not PASSCODE:
         raise SystemExit(f"Set DEMO_PASSCODE before serving on {HOST}, or anyone who finds the address could use your OpenAI key.")
     server = ThreadingHTTPServer((HOST, PORT), partial(Handler, directory=str(HERE)))
-    print(f"Serving on http://localhost:{PORT}  (models: {MODEL}, {REALTIME_MODEL}; API key {'found' if API_KEY else 'MISSING'}; "
+    print(f"Serving on http://localhost:{PORT}  (model: {REALTIME_MODEL}; API key {'found' if API_KEY else 'MISSING'}; "
           f"passcode {'on, needed to open the page' if PASSCODE else 'off, localhost only'})")
     server.serve_forever()

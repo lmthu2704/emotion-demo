@@ -10,12 +10,9 @@ Webcam and microphone body-language demo that runs entirely in your browser.
 
 On the hosted page, video and audio are processed locally and never uploaded. The detectors are rough estimates, not reliable readings of how someone feels.
 
-## Run locally with the voice bot and AI explanations
+## Run locally with the voice bot
 
-Two panels use your OpenAI key, so they only appear when you run the local server:
-
-- **Talk to the bot**: a voice conversation through OpenAI's Realtime API (`gpt-realtime-2.1-mini`). After each thing you say, the page sends the bot a one-line summary of the face and voice readings (for example `face sad 62%, neutral 25%; voice calm 48%`), and the bot adjusts its tone. Your voice and that summary go to OpenAI; the video stays in the browser. The panel shows a running cost estimate. A 5-minute chat costs roughly $0.10, or about $0.30 with `OPENAI_REALTIME_MODEL=gpt-realtime-2.1` in `.env`.
-- **Explain**: sends one snapshot plus the readings to OpenAI (`gpt-4.1`), which describes what the person is doing. Each explanation is a paid call (about $0.003).
+The **Talk to the bot** panel uses your OpenAI key, so it only appears when you run the local server. It's a voice conversation through OpenAI's Realtime API (`gpt-realtime-2.1-mini`). After each thing you say, the page sends the bot a one-line summary of the face and voice readings (for example `face sad 62%, neutral 25%; voice calm 48%`), and the bot adjusts its tone. Your voice and that summary go to OpenAI; the video stays in the browser. The panel shows a running cost estimate. A 5-minute chat costs roughly $0.10, or about $0.30 with `OPENAI_REALTIME_MODEL=gpt-realtime-2.1` in `.env`.
 
 1. Copy `.env.example` to `.env` and add your `OPENAI_API_KEY`.
 2. `python server.py`
@@ -36,7 +33,7 @@ The free plan sleeps after 15 minutes without visitors, so the first visit after
 
 ## Share it from your computer with a passcode (quick, temporary)
 
-To let other people try the bot and Explain from their own computers while yours is running:
+To let other people try the bot from their own computers while yours is running:
 
 1. Add a passcode to `.env`, for example `DEMO_PASSCODE=purple-otter-sings`. Use a few words, not a short PIN. After 10 wrong passcodes in 10 minutes the server refuses everyone for a while, which makes guessing a few-word passcode impractical. `.env` is in `.gitignore`, so the passcode never goes to GitHub.
 2. Restart `python server.py`. The startup line should say `passcode on`.
