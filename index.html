@@ -516,7 +516,7 @@ const PRICES = {
 };
 const TRANSCRIBE_PER_MIN = 0.003;   // gpt-4o-mini-transcribe, for the "You" lines in the log
 const AUDIO_TOKENS_PER_SEC = 10;    // OpenAI counts user audio as about 1 token per 100 ms
-const INSTRUCTION_TOKENS = 300;     // about the size of BOT_INSTRUCTIONS in server.py
+const INSTRUCTION_TOKENS = 1500;    // about the size of BOT_INSTRUCTIONS in server.py
 let bot = null;   // the open session, see startBot()
 
 // POSTs to server.py and returns its JSON reply, which has "error" if something went wrong
